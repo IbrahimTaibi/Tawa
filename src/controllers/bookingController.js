@@ -8,6 +8,13 @@ const {
   sendBookingStatusUpdate,
 } = require("../utils/emailService");
 const PushNotificationService = require("../utils/pushNotificationService");
+const {
+  Errors,
+  ErrorFactory,
+  AuthorizationError,
+  NotFoundError,
+  ValidationError,
+} = require("../utils/errors");
 
 const createBookingSchema = Joi.object({
   serviceId: Joi.string().required(),
@@ -39,16 +46,12 @@ exports.createBooking = asyncHandler(async (req, res) => {
   // Check if user is a customer
   const user = await User.findById(req.userId);
   if (!user || user.role !== "customer") {
-    const err = new Error("Only customers can create bookings");
-    err.status = 403;
-    throw err;
+    throw new AuthorizationError("Only customers can create bookings");
   }
 
   const { error } = createBookingSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
   }
 
   const { serviceId, bookingDate, duration, location, customerNotes } =
@@ -57,22 +60,16 @@ exports.createBooking = asyncHandler(async (req, res) => {
   // Get the service and verify it exists and is active
   const service = await Service.findById(serviceId);
   if (!service) {
-    const err = new Error("Service not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Service not found");
   }
 
   if (service.status !== "active") {
-    const err = new Error("Service is not available for booking");
-    err.status = 400;
-    throw err;
+    throw new ValidationError("Service is not available for booking");
   }
 
   // Check if booking date is not in the past
   if (new Date(bookingDate) <= new Date()) {
-    const err = new Error("Booking date must be in the future");
-    err.status = 400;
-    throw err;
+    throw new ValidationError("Booking date must be in the future");
   }
 
   // Calculate total amount based on service pricing
@@ -196,19 +193,15 @@ exports.getBookingById = asyncHandler(async (req, res) => {
     .populate("customer", "name email phone");
 
   if (!booking) {
-    const err = new Error("Booking not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Booking not found");
   }
 
-  // Check if user is authorized to view this booking
+  // Check if user is a participant in this booking
   if (
-    booking.customer._id.toString() !== req.userId &&
-    booking.provider._id.toString() !== req.userId
+    booking.customer.toString() !== req.userId &&
+    booking.provider.toString() !== req.userId
   ) {
-    const err = new Error("Not authorized to view this booking");
-    err.status = 403;
-    throw err;
+    throw new AuthorizationError("You can only view your own bookings");
   }
 
   res.json({
@@ -219,82 +212,82 @@ exports.getBookingById = asyncHandler(async (req, res) => {
 
 // Update booking status (provider only)
 exports.updateBookingStatus = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
-
-  if (!booking) {
-    const err = new Error("Booking not found");
-    err.status = 404;
-    throw err;
-  }
-
-  // Check if user is the provider
-  if (booking.provider.toString() !== req.userId) {
-    const err = new Error("Only the provider can update booking status");
-    err.status = 403;
-    throw err;
-  }
-
   const { error } = updateStatusSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
+  }
+
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) {
+    throw new NotFoundError("Booking not found");
+  }
+
+  // Check if user is the provider of this booking
+  if (booking.provider.toString() !== req.userId) {
+    throw new AuthorizationError("You can only update your own bookings");
   }
 
   const { status, providerNotes, cancellationReason } = req.body;
-  const previousStatus = booking.status;
+
+  // Validate status transition
+  const validTransitions = {
+    pending: ["confirmed", "rejected"],
+    confirmed: ["in-progress", "cancelled"],
+    "in-progress": ["completed", "cancelled"],
+    completed: [],
+    cancelled: [],
+    rejected: [],
+  };
+
+  const currentStatus = booking.status;
+  if (!validTransitions[currentStatus]?.includes(status)) {
+    throw new ValidationError(
+      `Invalid status transition from ${currentStatus} to ${status}`,
+    );
+  }
 
   // Update booking
   booking.status = status;
   if (providerNotes) {
     booking.notes.providerNotes = providerNotes;
   }
-
-  if (status === "cancelled" && cancellationReason) {
+  if (cancellationReason) {
     booking.cancellationReason = cancellationReason;
-    booking.cancelledBy = "provider";
-  }
-
-  if (status === "completed") {
-    booking.completedAt = new Date();
   }
 
   await booking.save();
 
-  // Populate details for response
+  // Populate booking for response
   await booking.populate([
     { path: "service", select: "title description category" },
     { path: "provider", select: "name businessName phone" },
     { path: "customer", select: "name email" },
   ]);
 
-  // Send status update email if status changed (non-blocking)
-  if (previousStatus !== status) {
-    try {
-      await sendBookingStatusUpdate(
+  // Send status update email (non-blocking)
+  try {
+    await sendBookingStatusUpdate(booking, booking.service, booking.customer);
+  } catch (emailError) {
+    console.error("Failed to send status update email:", emailError);
+  }
+
+  // Send push notification to customer (non-blocking)
+  try {
+    const customer = await User.findById(booking.customer).select(
+      "notificationPreferences",
+    );
+    if (
+      customer &&
+      customer.notificationPreferences?.bookingUpdates !== false
+    ) {
+      await PushNotificationService.sendBookingStatusUpdateNotification(
         booking,
         booking.service,
         booking.customer,
-        status,
       );
-    } catch (emailError) {
-      console.error("Failed to send status update email:", emailError);
-      // Don't fail the status update if email fails
     }
-
-    // Send push notification to customer (non-blocking)
-    try {
-      if (booking.customer.notificationPreferences?.bookingUpdates !== false) {
-        await PushNotificationService.sendBookingStatusNotification(
-          booking,
-          status,
-          booking.customer._id,
-        );
-      }
-    } catch (pushError) {
-      console.error("Failed to send push notification:", pushError);
-      // Don't fail the status update if push notification fails
-    }
+  } catch (pushError) {
+    console.error("Failed to send push notification:", pushError);
   }
 
   res.json({
@@ -306,51 +299,55 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
 
 // Cancel booking (customer only)
 exports.cancelBooking = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
+  const { cancellationReason } = req.body;
 
+  const booking = await Booking.findById(req.params.id);
   if (!booking) {
-    const err = new Error("Booking not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Booking not found");
   }
 
-  // Check if user is the customer
+  // Check if user is the customer of this booking
   if (booking.customer.toString() !== req.userId) {
-    const err = new Error("Only the customer can cancel this booking");
-    err.status = 403;
-    throw err;
+    throw new AuthorizationError("You can only cancel your own bookings");
   }
 
   // Check if booking can be cancelled
-  if (booking.status !== "pending" && booking.status !== "confirmed") {
-    const err = new Error("Booking cannot be cancelled in its current status");
-    err.status = 400;
-    throw err;
-  }
-
-  // Check if booking is not too close to the scheduled time (e.g., within 24 hours)
-  const hoursUntilBooking =
-    (new Date(booking.bookingDate) - new Date()) / (1000 * 60 * 60);
-  if (hoursUntilBooking < 24) {
-    const err = new Error(
-      "Booking cannot be cancelled within 24 hours of scheduled time",
+  if (!["pending", "confirmed"].includes(booking.status)) {
+    throw new ValidationError(
+      "Booking cannot be cancelled in its current status",
     );
-    err.status = 400;
-    throw err;
   }
 
+  // Update booking
   booking.status = "cancelled";
-  booking.cancelledBy = "customer";
-  booking.cancellationReason =
-    req.body.cancellationReason || "Cancelled by customer";
+  booking.cancellationReason = cancellationReason || "Cancelled by customer";
   await booking.save();
 
-  // Populate details for response
+  // Populate booking for response
   await booking.populate([
     { path: "service", select: "title description category" },
     { path: "provider", select: "name businessName phone" },
     { path: "customer", select: "name email" },
   ]);
+
+  // Send cancellation notification to provider (non-blocking)
+  try {
+    const provider = await User.findById(booking.provider).select(
+      "notificationPreferences",
+    );
+    if (
+      provider &&
+      provider.notificationPreferences?.bookingUpdates !== false
+    ) {
+      await PushNotificationService.sendBookingCancellationNotification(
+        booking,
+        booking.service,
+        booking.provider,
+      );
+    }
+  } catch (pushError) {
+    console.error("Failed to send push notification:", pushError);
+  }
 
   res.json({
     success: true,

@@ -2,6 +2,13 @@ const Service = require("../models/Service");
 const User = require("../models/User");
 const Joi = require("joi");
 const asyncHandler = require("../utils/asyncHandler");
+const {
+  Errors,
+  ErrorFactory,
+  AuthorizationError,
+  NotFoundError,
+  ValidationError,
+} = require("../utils/errors");
 
 const createServiceSchema = Joi.object({
   title: Joi.string().min(3).max(100).required(),
@@ -147,16 +154,12 @@ exports.createService = asyncHandler(async (req, res) => {
   // Check if user is a provider
   const user = await User.findById(req.user.id);
   if (!user || user.role !== "provider") {
-    const err = new Error("Only providers can create services");
-    err.status = 403;
-    throw err;
+    throw new AuthorizationError("Only providers can create services");
   }
 
   const { error } = createServiceSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
   }
 
   const serviceData = {
@@ -201,22 +204,26 @@ exports.getAllServices = asyncHandler(async (req, res) => {
     sortOrder = "desc",
   } = req.query;
 
-  const query = { status };
+  const query = {};
 
+  // Add filters
   if (category) {
     query.category = category;
   }
-
+  if (status) {
+    query.status = status;
+  }
   if (search) {
     query.$text = { $search: search };
   }
 
-  const sortOptions = {};
-  sortOptions[sortBy] = sortOrder === "desc" ? -1 : 1;
+  // Build sort object
+  const sort = {};
+  sort[sortBy] = sortOrder === "asc" ? 1 : -1;
 
   const services = await Service.find(query)
-    .populate("provider", "name businessName serviceCategory")
-    .sort(sortOptions)
+    .populate("provider", "name businessName averageRating totalReviews")
+    .sort(sort)
     .limit(limit * 1)
     .skip((page - 1) * limit)
     .exec();
@@ -225,7 +232,7 @@ exports.getAllServices = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    services,
+    data: services,
     pagination: {
       currentPage: page,
       totalPages: Math.ceil(total / limit),
@@ -238,73 +245,71 @@ exports.getAllServices = asyncHandler(async (req, res) => {
 
 // Get service by ID (public)
 exports.getServiceById = asyncHandler(async (req, res) => {
-  const service = await Service.findById(req.params.id).populate(
-    "provider",
-    "name businessName serviceCategory phone address",
-  );
+  const service = await Service.findById(req.params.id)
+    .populate("provider", "name businessName averageRating totalReviews")
+    .populate("reviews", "rating comment createdAt");
 
   if (!service) {
-    const err = new Error("Service not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Service not found");
   }
 
   res.json({
     success: true,
-    service,
+    data: service,
   });
 });
 
-// Update service (owner only)
+// Update service (provider only)
 exports.updateService = asyncHandler(async (req, res) => {
   const service = await Service.findById(req.params.id);
 
   if (!service) {
-    const err = new Error("Service not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Service not found");
   }
 
-  if (service.provider.toString() !== req.userId) {
-    const err = new Error("Not authorized to update this service");
-    err.status = 403;
-    throw err;
+  // Check if user is the provider of this service
+  if (service.provider.toString() !== req.user.id) {
+    throw new AuthorizationError("You can only update your own services");
   }
 
   const { error } = updateServiceSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
+  }
+
+  // Convert coordinates format if provided
+  if (req.body.location && req.body.location.coordinates) {
+    const { lat, lng } = req.body.location.coordinates;
+    req.body.location.coordinates = {
+      type: "Point",
+      coordinates: [lng, lat],
+    };
   }
 
   const updatedService = await Service.findByIdAndUpdate(
     req.params.id,
     req.body,
     { new: true, runValidators: true },
-  ).populate("provider", "name businessName serviceCategory");
+  ).populate("provider", "name businessName averageRating totalReviews");
 
   res.json({
     success: true,
     message: "Service updated successfully",
-    service: updatedService,
+    data: updatedService,
   });
 });
 
-// Delete service (owner only)
+// Delete service (provider only)
 exports.deleteService = asyncHandler(async (req, res) => {
   const service = await Service.findById(req.params.id);
 
   if (!service) {
-    const err = new Error("Service not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Service not found");
   }
 
-  if (service.provider.toString() !== req.userId) {
-    const err = new Error("Not authorized to delete this service");
-    err.status = 403;
-    throw err;
+  // Check if user is the provider of this service
+  if (service.provider.toString() !== req.user.id) {
+    throw new AuthorizationError("You can only delete your own services");
   }
 
   await Service.findByIdAndDelete(req.params.id);
@@ -317,15 +322,17 @@ exports.deleteService = asyncHandler(async (req, res) => {
 
 // Get services by provider (public)
 exports.getServicesByProvider = asyncHandler(async (req, res) => {
+  const { providerId } = req.params;
   const { page = 1, limit = 10, status = "active" } = req.query;
 
-  const query = {
-    provider: req.params.providerId,
-    status,
-  };
+  const query = { provider: providerId };
+
+  if (status) {
+    query.status = status;
+  }
 
   const services = await Service.find(query)
-    .populate("provider", "name businessName serviceCategory")
+    .populate("provider", "name businessName averageRating totalReviews")
     .sort({ createdAt: -1 })
     .limit(limit * 1)
     .skip((page - 1) * limit)
@@ -335,7 +342,39 @@ exports.getServicesByProvider = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    services,
+    data: services,
+    pagination: {
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      totalServices: total,
+      hasNextPage: page * limit < total,
+      hasPrevPage: page > 1,
+    },
+  });
+});
+
+// Get user's own services (provider only)
+exports.getMyServices = asyncHandler(async (req, res) => {
+  const { page = 1, limit = 10, status } = req.query;
+
+  const query = { provider: req.user.id };
+
+  if (status) {
+    query.status = status;
+  }
+
+  const services = await Service.find(query)
+    .populate("provider", "name businessName averageRating totalReviews")
+    .sort({ createdAt: -1 })
+    .limit(limit * 1)
+    .skip((page - 1) * limit)
+    .exec();
+
+  const total = await Service.countDocuments(query);
+
+  res.json({
+    success: true,
+    data: services,
     pagination: {
       currentPage: page,
       totalPages: Math.ceil(total / limit),

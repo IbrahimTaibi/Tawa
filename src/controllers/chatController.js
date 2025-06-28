@@ -6,6 +6,13 @@ const Service = require("../models/Service");
 const Booking = require("../models/Booking");
 const { sendNewMessageNotification } = require("../utils/emailService");
 const PushNotificationService = require("../utils/pushNotificationService");
+const {
+  Errors,
+  ErrorFactory,
+  NotFoundError,
+  AuthorizationError,
+  ValidationError,
+} = require("../utils/errors");
 
 // @desc    Get all chats for a user
 // @route   GET /api/chats
@@ -46,19 +53,13 @@ const createOrGetChat = asyncHandler(async (req, res) => {
   // Validate service exists
   const service = await Service.findById(serviceId);
   if (!service) {
-    return res.status(404).json({
-      success: false,
-      message: "Service not found",
-    });
+    throw new NotFoundError("Service not found");
   }
 
   // Validate other user exists
   const otherUser = await User.findById(otherUserId);
   if (!otherUser) {
-    return res.status(404).json({
-      success: false,
-      message: "User not found",
-    });
+    throw new NotFoundError("User not found");
   }
 
   // Check if chat already exists
@@ -112,17 +113,11 @@ const getChatMessages = asyncHandler(async (req, res) => {
   // Verify user is participant in the chat
   const chat = await Chat.findById(chatId);
   if (!chat) {
-    return res.status(404).json({
-      success: false,
-      message: "Chat not found",
-    });
+    throw new NotFoundError("Chat not found");
   }
 
   if (!chat.participants.includes(userId)) {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied",
-    });
+    throw new AuthorizationError("Access denied");
   }
 
   // Mark messages as read
@@ -170,27 +165,18 @@ const sendMessage = asyncHandler(async (req, res) => {
   // Validate chat exists and user is participant
   const chat = await Chat.findById(chatId);
   if (!chat) {
-    return res.status(404).json({
-      success: false,
-      message: "Chat not found",
-    });
+    throw new NotFoundError("Chat not found");
   }
 
   if (!chat.participants.includes(userId)) {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied",
-    });
+    throw new AuthorizationError("Access denied");
   }
 
   // Validate reply message if provided
   if (replyTo) {
     const replyMessage = await Message.findById(replyTo);
     if (!replyMessage || replyMessage.chatId.toString() !== chatId) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid reply message",
-      });
+      throw new ValidationError("Invalid reply message");
     }
   }
 
@@ -206,59 +192,63 @@ const sendMessage = asyncHandler(async (req, res) => {
 
   await message.save();
 
-  // Increment unread count for other participants
-  const otherParticipants = chat.participants.filter(
-    (p) => p.toString() !== userId,
-  );
-  for (const participantId of otherParticipants) {
-    await chat.incrementUnread(participantId);
-  }
-
   // Populate message with sender details
   await message.populate("sender", "name email avatar");
-  if (replyTo) {
-    await message.populate("replyTo", "content sender");
-  }
+  await message.populate("replyTo", "content sender");
 
-  // Send email notification to other participants (non-blocking)
+  // Update chat's last message
+  chat.lastMessage = message._id;
+  chat.lastMessageAt = new Date();
+  await chat.save();
+
+  // Get other participants for notifications
+  const otherParticipants = chat.participants.filter(
+    (participant) => participant.toString() !== userId,
+  );
+
+  // Send email notifications to other participants (non-blocking)
   try {
-    const sender = await User.findById(userId).select("name email");
-    const otherParticipant = await User.findById(otherParticipants[0]).select(
-      "name email",
-    );
-
-    if (sender && otherParticipant) {
-      await sendNewMessageNotification(sender, otherParticipant, chatId);
+    for (const participantId of otherParticipants) {
+      const participant = await User.findById(participantId);
+      if (
+        participant &&
+        participant.notificationPreferences?.newMessages !== false
+      ) {
+        await sendNewMessageNotification(
+          participant,
+          message,
+          chat,
+          req.user.name,
+        );
+      }
     }
   } catch (emailError) {
-    console.error("Failed to send message notification email:", emailError);
-    // Don't fail the message sending if email fails
+    console.error("Failed to send email notifications:", emailError);
   }
 
-  // Send push notification to other participants (non-blocking)
+  // Send push notifications to other participants (non-blocking)
   try {
-    const sender = await User.findById(userId).select("name");
     for (const participantId of otherParticipants) {
-      const receiver = await User.findById(participantId).select(
-        "notificationPreferences",
-      );
-      if (receiver && receiver.notificationPreferences?.newMessages !== false) {
+      const participant = await User.findById(participantId);
+      if (
+        participant &&
+        participant.notificationPreferences?.newMessages !== false
+      ) {
         await PushNotificationService.sendNewMessageNotification(
-          sender,
           message,
+          chat,
           participantId,
         );
       }
     }
   } catch (pushError) {
-    console.error("Failed to send push notification:", pushError);
-    // Don't fail the message sending if push notification fails
+    console.error("Failed to send push notifications:", pushError);
   }
 
   res.status(201).json({
     success: true,
-    data: message,
     message: "Message sent successfully",
+    data: message,
   });
 });
 
@@ -321,43 +311,25 @@ const deleteMessage = asyncHandler(async (req, res) => {
   const { chatId, messageId } = req.params;
   const userId = req.user.id;
 
-  // Validate chat exists and user is participant
-  const chat = await Chat.findById(chatId);
-  if (!chat) {
-    return res.status(404).json({
-      success: false,
-      message: "Chat not found",
-    });
-  }
-
-  if (!chat.participants.includes(userId)) {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied",
-    });
-  }
-
-  // Find and validate message
   const message = await Message.findById(messageId);
-  if (!message || message.chatId.toString() !== chatId) {
-    return res.status(404).json({
-      success: false,
-      message: "Message not found",
-    });
+  if (!message) {
+    throw new NotFoundError("Message not found");
   }
 
-  // Check if user can delete the message (sender or admin)
-  if (message.sender.toString() !== userId.toString()) {
-    return res.status(403).json({
-      success: false,
-      message: "Cannot delete this message",
-    });
+  if (message.chatId.toString() !== chatId) {
+    throw new ValidationError("Message does not belong to this chat");
+  }
+
+  if (message.sender.toString() !== userId) {
+    throw new AuthorizationError("You can only delete your own messages");
   }
 
   // Soft delete the message
-  await message.deleteMessage();
+  message.isDeleted = true;
+  message.deletedAt = new Date();
+  await message.save();
 
-  res.status(200).json({
+  res.json({
     success: true,
     message: "Message deleted successfully",
   });
@@ -370,26 +342,18 @@ const markChatAsRead = asyncHandler(async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user.id;
 
-  // Validate chat exists and user is participant
   const chat = await Chat.findById(chatId);
   if (!chat) {
-    return res.status(404).json({
-      success: false,
-      message: "Chat not found",
-    });
+    throw new NotFoundError("Chat not found");
   }
 
   if (!chat.participants.includes(userId)) {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied",
-    });
+    throw new AuthorizationError("Access denied");
   }
 
-  // Mark chat as read
   await chat.markAsRead(userId);
 
-  res.status(200).json({
+  res.json({
     success: true,
     message: "Chat marked as read",
   });
@@ -459,6 +423,53 @@ const archiveChat = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Get chat statistics
+// @route   GET /api/chats/:chatId/stats
+// @access  Private
+const getChatStats = asyncHandler(async (req, res) => {
+  const { chatId } = req.params;
+  const userId = req.user.id;
+
+  const chat = await Chat.findById(chatId);
+  if (!chat) {
+    throw new NotFoundError("Chat not found");
+  }
+
+  if (!chat.participants.includes(userId)) {
+    throw new AuthorizationError("Access denied");
+  }
+
+  const stats = await Message.aggregate([
+    {
+      $match: {
+        chatId: chat._id,
+        isDeleted: false,
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalMessages: { $sum: 1 },
+        totalAttachments: {
+          $sum: { $size: { $ifNull: ["$attachments", []] } },
+        },
+      },
+    },
+  ]);
+
+  const unreadCount = chat.getUnreadCount(userId);
+
+  res.json({
+    success: true,
+    data: {
+      totalMessages: stats[0]?.totalMessages || 0,
+      totalAttachments: stats[0]?.totalAttachments || 0,
+      unreadCount,
+      participants: chat.participants.length,
+    },
+  });
+});
+
 module.exports = {
   getUserChats,
   createOrGetChat,
@@ -469,4 +480,5 @@ module.exports = {
   markChatAsRead,
   getUnreadCount,
   archiveChat,
+  getChatStats,
 };

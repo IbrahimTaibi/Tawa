@@ -6,6 +6,24 @@ const User = require("../models/User");
 const Joi = require("joi");
 const asyncHandler = require("../utils/asyncHandler");
 const PushNotificationService = require("../utils/pushNotificationService");
+const {
+  Errors,
+  ErrorFactory,
+  NotFoundError,
+  AuthorizationError,
+  ValidationError,
+  ConflictError,
+} = require("../utils/errors");
+
+const createReviewSchema = Joi.object({
+  bookingId: Joi.string().required(),
+  rating: Joi.number().min(1).max(5).required(),
+  comment: Joi.string().min(10).max(1000).required(),
+  serviceQuality: Joi.number().min(1).max(5).optional(),
+  communication: Joi.number().min(1).max(5).optional(),
+  punctuality: Joi.number().min(1).max(5).optional(),
+  valueForMoney: Joi.number().min(1).max(5).optional(),
+});
 
 // @desc    Create a new review
 // @route   POST /api/reviews
@@ -13,9 +31,7 @@ const PushNotificationService = require("../utils/pushNotificationService");
 const createReview = asyncHandler(async (req, res) => {
   const { error } = createReviewSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
   }
 
   const {
@@ -31,30 +47,22 @@ const createReview = asyncHandler(async (req, res) => {
   // Check if booking exists and belongs to the user
   const booking = await Booking.findById(bookingId);
   if (!booking) {
-    const err = new Error("Booking not found");
-    err.status = 404;
-    throw err;
+    throw new NotFoundError("Booking not found");
   }
 
   if (booking.customer.toString() !== req.userId) {
-    const err = new Error("You can only review your own bookings");
-    err.status = 403;
-    throw err;
+    throw new AuthorizationError("You can only review your own bookings");
   }
 
   // Check if booking is completed
   if (booking.status !== "completed") {
-    const err = new Error("You can only review completed bookings");
-    err.status = 400;
-    throw err;
+    throw new ValidationError("You can only review completed bookings");
   }
 
   // Check if review already exists for this booking
   const existingReview = await Review.findOne({ booking: bookingId });
   if (existingReview) {
-    const err = new Error("You have already reviewed this booking");
-    err.status = 400;
-    throw err;
+    throw new ConflictError("You have already reviewed this booking");
   }
 
   // Create the review
@@ -246,153 +254,28 @@ const getProviderReviews = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Update a review
-// @route   PUT /api/reviews/:id
-// @access  Private (review author only)
-const updateReview = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { rating, title, review } = req.body;
-
-  const reviewDoc = await Review.findById(id);
-
-  if (!reviewDoc) {
-    return res.status(404).json({
-      success: false,
-      message: "Review not found",
-    });
-  }
-
-  // Check if user is the author
-  if (reviewDoc.customer.toString() !== req.user.id) {
-    return res.status(403).json({
-      success: false,
-      message: "You can only update your own reviews",
-    });
-  }
-
-  // Update fields
-  if (rating !== undefined) {
-    if (rating < 1 || rating > 5) {
-      return res.status(400).json({
-        success: false,
-        message: "Rating must be between 1 and 5",
-      });
-    }
-    reviewDoc.rating = rating;
-  }
-
-  if (title !== undefined) {
-    reviewDoc.title = title;
-  }
-
-  if (review !== undefined) {
-    reviewDoc.review = review;
-  }
-
-  await reviewDoc.save();
-
-  // Update provider's average rating
-  await updateProviderRating(reviewDoc.provider);
-
-  // Populate the updated review
-  await reviewDoc.populate([
-    { path: "customer", select: "name email" },
-    { path: "provider", select: "name email" },
-    { path: "service", select: "title category" },
-  ]);
-
-  res.json({
-    success: true,
-    data: reviewDoc,
-  });
-});
-
-// @desc    Delete a review
-// @route   DELETE /api/reviews/:id
-// @access  Private (review author only)
-const deleteReview = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const review = await Review.findById(id);
-
-  if (!review) {
-    return res.status(404).json({
-      success: false,
-      message: "Review not found",
-    });
-  }
-
-  // Check if user is the author
-  if (review.customer.toString() !== req.user.id) {
-    return res.status(403).json({
-      success: false,
-      message: "You can only delete your own reviews",
-    });
-  }
-
-  await Review.findByIdAndDelete(id);
-
-  // Update provider's average rating
-  await updateProviderRating(review.provider);
-
-  res.json({
-    success: true,
-    message: "Review deleted successfully",
-  });
-});
-
-// @desc    Mark review as helpful
-// @route   POST /api/reviews/:id/helpful
-// @access  Private
-const markHelpful = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const review = await Review.findById(id);
-
-  if (!review) {
-    return res.status(404).json({
-      success: false,
-      message: "Review not found",
-    });
-  }
-
-  const userId = req.user.id;
-  const voterIndex = review.helpfulVotes.voters.indexOf(userId);
-
-  if (voterIndex > -1) {
-    // Remove vote
-    review.helpfulVotes.voters.splice(voterIndex, 1);
-    review.helpfulVotes.count = Math.max(0, review.helpfulVotes.count - 1);
-  } else {
-    // Add vote
-    review.helpfulVotes.voters.push(userId);
-    review.helpfulVotes.count += 1;
-  }
-
-  await review.save();
-
-  res.json({
-    success: true,
-    data: {
-      helpfulVotes: review.helpfulVotes,
-      hasVoted: voterIndex === -1,
-    },
-  });
-});
-
 // @desc    Get user's reviews
 // @route   GET /api/reviews/my-reviews
 // @access  Private
 const getMyReviews = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
+  const { page = 1, limit = 10, role = "customer" } = req.query;
+  const userId = req.userId;
+
   const skip = (page - 1) * limit;
 
-  const query = { customer: req.user.id };
+  // Build query based on role
+  const query = {};
+  if (role === "customer") {
+    query.customer = userId;
+  } else if (role === "provider") {
+    query.provider = userId;
+  }
 
   const reviews = await Review.find(query)
+    .populate("customer", "name email")
     .populate("provider", "name email")
     .populate("service", "title category")
+    .populate("booking", "bookingDate")
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit);
@@ -413,44 +296,210 @@ const getMyReviews = asyncHandler(async (req, res) => {
   });
 });
 
-// Helper function to update provider's average rating
-const updateProviderRating = async (providerId) => {
-  try {
-    const result = await Review.aggregate([
-      {
-        $match: {
-          provider: new mongoose.Types.ObjectId(providerId),
-          status: "approved",
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          avgRating: { $avg: "$rating" },
-          totalReviews: { $sum: 1 },
-        },
-      },
-    ]);
+// @desc    Update a review
+// @route   PUT /api/reviews/:reviewId
+// @access  Private (review owner only)
+const updateReview = asyncHandler(async (req, res) => {
+  const { reviewId } = req.params;
+  const userId = req.userId;
 
-    const averageRating = result.length > 0 ? result[0].avgRating : 0;
-    const totalReviews = result.length > 0 ? result[0].totalReviews : 0;
-
-    // Update provider's rating in User model
-    await User.findByIdAndUpdate(providerId, {
-      averageRating: Math.round(averageRating * 10) / 10,
-      totalReviews,
-    });
-  } catch (error) {
-    console.error("Error updating provider rating:", error);
+  const review = await Review.findById(reviewId);
+  if (!review) {
+    throw new NotFoundError("Review not found");
   }
+
+  if (review.customer.toString() !== userId) {
+    throw new AuthorizationError("You can only update your own reviews");
+  }
+
+  // Check if review is approved (can't edit approved reviews)
+  if (review.status === "approved") {
+    throw new ValidationError("Cannot edit approved reviews");
+  }
+
+  const {
+    rating,
+    comment,
+    serviceQuality,
+    communication,
+    punctuality,
+    valueForMoney,
+  } = req.body;
+
+  // Update review fields
+  if (rating !== undefined) review.rating = rating;
+  if (comment !== undefined) review.comment = comment;
+  if (serviceQuality !== undefined) review.serviceQuality = serviceQuality;
+  if (communication !== undefined) review.communication = communication;
+  if (punctuality !== undefined) review.punctuality = punctuality;
+  if (valueForMoney !== undefined) review.valueForMoney = valueForMoney;
+
+  review.updatedAt = new Date();
+  await review.save();
+
+  // Update service and provider ratings
+  await updateServiceRating(review.service);
+  await updateProviderRating(review.provider);
+
+  // Populate review for response
+  await review.populate([
+    { path: "customer", select: "name email" },
+    { path: "provider", select: "name email" },
+    { path: "service", select: "title category" },
+  ]);
+
+  res.json({
+    success: true,
+    message: "Review updated successfully",
+    review,
+  });
+});
+
+// @desc    Delete a review
+// @route   DELETE /api/reviews/:reviewId
+// @access  Private (review owner only)
+const deleteReview = asyncHandler(async (req, res) => {
+  const { reviewId } = req.params;
+  const userId = req.userId;
+
+  const review = await Review.findById(reviewId);
+  if (!review) {
+    throw new NotFoundError("Review not found");
+  }
+
+  if (review.customer.toString() !== userId) {
+    throw new AuthorizationError("You can only delete your own reviews");
+  }
+
+  // Store service and provider IDs before deletion
+  const serviceId = review.service;
+  const providerId = review.provider;
+
+  await Review.findByIdAndDelete(reviewId);
+
+  // Update service and provider ratings
+  await updateServiceRating(serviceId);
+  await updateProviderRating(providerId);
+
+  res.json({
+    success: true,
+    message: "Review deleted successfully",
+  });
+});
+
+// @desc    Mark review as helpful
+// @route   POST /api/reviews/:reviewId/helpful
+// @access  Private
+const markReviewHelpful = asyncHandler(async (req, res) => {
+  const { reviewId } = req.params;
+  const userId = req.userId;
+
+  const review = await Review.findById(reviewId);
+  if (!review) {
+    throw new NotFoundError("Review not found");
+  }
+
+  // Check if user already marked this review as helpful
+  if (review.helpfulVotes.includes(userId)) {
+    throw new ConflictError("You have already marked this review as helpful");
+  }
+
+  review.helpfulVotes.push(userId);
+  await review.save();
+
+  res.json({
+    success: true,
+    message: "Review marked as helpful",
+    helpfulCount: review.helpfulVotes.length,
+  });
+});
+
+// @desc    Remove helpful vote from review
+// @route   DELETE /api/reviews/:reviewId/helpful
+// @access  Private
+const removeHelpfulVote = asyncHandler(async (req, res) => {
+  const { reviewId } = req.params;
+  const userId = req.userId;
+
+  const review = await Review.findById(reviewId);
+  if (!review) {
+    throw new NotFoundError("Review not found");
+  }
+
+  // Remove user from helpful votes
+  review.helpfulVotes = review.helpfulVotes.filter(
+    (vote) => vote.toString() !== userId,
+  );
+  await review.save();
+
+  res.json({
+    success: true,
+    message: "Helpful vote removed",
+    helpfulCount: review.helpfulVotes.length,
+  });
+});
+
+// Helper function to update service rating
+const updateServiceRating = async (serviceId) => {
+  const stats = await Review.aggregate([
+    {
+      $match: {
+        service: new mongoose.Types.ObjectId(serviceId),
+        status: "approved",
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        averageRating: { $avg: "$rating" },
+        totalReviews: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const averageRating = stats.length > 0 ? stats[0].averageRating : 0;
+  const totalReviews = stats.length > 0 ? stats[0].totalReviews : 0;
+
+  await Service.findByIdAndUpdate(serviceId, {
+    "rating.average": Math.round(averageRating * 10) / 10,
+    "rating.totalReviews": totalReviews,
+  });
+};
+
+// Helper function to update provider rating
+const updateProviderRating = async (providerId) => {
+  const stats = await Review.aggregate([
+    {
+      $match: {
+        provider: new mongoose.Types.ObjectId(providerId),
+        status: "approved",
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        averageRating: { $avg: "$rating" },
+        totalReviews: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const averageRating = stats.length > 0 ? stats[0].averageRating : 0;
+  const totalReviews = stats.length > 0 ? stats[0].totalReviews : 0;
+
+  await User.findByIdAndUpdate(providerId, {
+    averageRating: Math.round(averageRating * 10) / 10,
+    totalReviews: totalReviews,
+  });
 };
 
 module.exports = {
   createReview,
   getServiceReviews,
   getProviderReviews,
+  getMyReviews,
   updateReview,
   deleteReview,
-  markHelpful,
-  getMyReviews,
+  markReviewHelpful,
+  removeHelpfulVote,
 };
