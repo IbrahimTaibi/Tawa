@@ -84,6 +84,52 @@ const userSchema = new mongoose.Schema({
   resetPasswordExpires: {
     type: Date,
   },
+  // Push notification subscriptions
+  pushSubscriptions: [
+    {
+      endpoint: {
+        type: String,
+        required: true,
+      },
+      keys: {
+        p256dh: {
+          type: String,
+          required: true,
+        },
+        auth: {
+          type: String,
+          required: true,
+        },
+      },
+    },
+  ],
+  // Notification preferences
+  notificationPreferences: {
+    newBookings: {
+      type: Boolean,
+      default: true,
+    },
+    bookingUpdates: {
+      type: Boolean,
+      default: true,
+    },
+    newMessages: {
+      type: Boolean,
+      default: true,
+    },
+    newReviews: {
+      type: Boolean,
+      default: true,
+    },
+    serviceApprovals: {
+      type: Boolean,
+      default: true,
+    },
+    reminders: {
+      type: Boolean,
+      default: true,
+    },
+  },
   createdAt: {
     type: Date,
     default: Date.now,

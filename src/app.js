@@ -10,6 +10,7 @@ const bookingRoutes = require("./routes/bookings");
 const reviewRoutes = require("./routes/reviews");
 const searchRoutes = require("./routes/search");
 const chatRoutes = require("./routes/chats");
+const pushRoutes = require("./routes/push");
 const errorHandler = require("./middleware/errorHandler");
 const adminRoutes = require("./routes/admin");
 
@@ -37,6 +38,7 @@ app.use("/api/bookings", bookingRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/chats", chatRoutes);
+app.use("/api/push", pushRoutes);
 app.use("/api/admin", adminRoutes);
 
 // 404 handler

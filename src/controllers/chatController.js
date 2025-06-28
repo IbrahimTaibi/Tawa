@@ -5,6 +5,7 @@ const User = require("../models/User");
 const Service = require("../models/Service");
 const Booking = require("../models/Booking");
 const { sendNewMessageNotification } = require("../utils/emailService");
+const PushNotificationService = require("../utils/pushNotificationService");
 
 // @desc    Get all chats for a user
 // @route   GET /api/chats
@@ -232,6 +233,26 @@ const sendMessage = asyncHandler(async (req, res) => {
   } catch (emailError) {
     console.error("Failed to send message notification email:", emailError);
     // Don't fail the message sending if email fails
+  }
+
+  // Send push notification to other participants (non-blocking)
+  try {
+    const sender = await User.findById(userId).select("name");
+    for (const participantId of otherParticipants) {
+      const receiver = await User.findById(participantId).select(
+        "notificationPreferences",
+      );
+      if (receiver && receiver.notificationPreferences?.newMessages !== false) {
+        await PushNotificationService.sendNewMessageNotification(
+          sender,
+          message,
+          participantId,
+        );
+      }
+    }
+  } catch (pushError) {
+    console.error("Failed to send push notification:", pushError);
+    // Don't fail the message sending if push notification fails
   }
 
   res.status(201).json({

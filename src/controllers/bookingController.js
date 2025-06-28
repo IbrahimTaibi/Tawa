@@ -7,6 +7,7 @@ const {
   sendBookingConfirmation,
   sendBookingStatusUpdate,
 } = require("../utils/emailService");
+const PushNotificationService = require("../utils/pushNotificationService");
 
 const createBookingSchema = Joi.object({
   serviceId: Joi.string().required(),
@@ -119,6 +120,20 @@ exports.createBooking = asyncHandler(async (req, res) => {
   } catch (emailError) {
     console.error("Failed to send booking confirmation email:", emailError);
     // Don't fail the booking creation if email fails
+  }
+
+  // Send push notification to provider (non-blocking)
+  try {
+    if (booking.provider.notificationPreferences?.newBookings !== false) {
+      await PushNotificationService.sendNewBookingNotification(
+        booking,
+        booking.service,
+        booking.provider._id,
+      );
+    }
+  } catch (pushError) {
+    console.error("Failed to send push notification:", pushError);
+    // Don't fail the booking creation if push notification fails
   }
 
   res.status(201).json({
@@ -265,6 +280,20 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
     } catch (emailError) {
       console.error("Failed to send status update email:", emailError);
       // Don't fail the status update if email fails
+    }
+
+    // Send push notification to customer (non-blocking)
+    try {
+      if (booking.customer.notificationPreferences?.bookingUpdates !== false) {
+        await PushNotificationService.sendBookingStatusNotification(
+          booking,
+          status,
+          booking.customer._id,
+        );
+      }
+    } catch (pushError) {
+      console.error("Failed to send push notification:", pushError);
+      // Don't fail the status update if push notification fails
     }
   }
 

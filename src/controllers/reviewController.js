@@ -3,98 +3,112 @@ const Review = require("../models/Review");
 const Booking = require("../models/Booking");
 const Service = require("../models/Service");
 const User = require("../models/User");
+const Joi = require("joi");
 const asyncHandler = require("../utils/asyncHandler");
+const PushNotificationService = require("../utils/pushNotificationService");
 
 // @desc    Create a new review
 // @route   POST /api/reviews
 // @access  Private (customers only)
 const createReview = asyncHandler(async (req, res) => {
-  const { bookingId, rating, title, review } = req.body;
-
-  // Validate input
-  if (!bookingId || !rating || !title || !review) {
-    return res.status(400).json({
-      success: false,
-      message: "Please provide bookingId, rating, title, and review",
-    });
+  const { error } = createReviewSchema.validate(req.body);
+  if (error) {
+    const err = new Error(error.details[0].message);
+    err.status = 400;
+    throw err;
   }
 
-  if (rating < 1 || rating > 5) {
-    return res.status(400).json({
-      success: false,
-      message: "Rating must be between 1 and 5",
-    });
-  }
+  const {
+    bookingId,
+    rating,
+    comment,
+    serviceQuality,
+    communication,
+    punctuality,
+    valueForMoney,
+  } = req.body;
 
-  // Check if user is a customer
-  if (req.user.role !== "customer") {
-    return res.status(403).json({
-      success: false,
-      message: "Only customers can create reviews",
-    });
-  }
-
-  // Find the booking
-  const booking = await Booking.findById(bookingId)
-    .populate("service")
-    .populate("provider");
-
+  // Check if booking exists and belongs to the user
+  const booking = await Booking.findById(bookingId);
   if (!booking) {
-    return res.status(404).json({
-      success: false,
-      message: "Booking not found",
-    });
+    const err = new Error("Booking not found");
+    err.status = 404;
+    throw err;
   }
 
-  // Verify booking belongs to the customer
-  if (booking.customer.toString() !== req.user.id) {
-    return res.status(403).json({
-      success: false,
-      message: "You can only review your own bookings",
-    });
+  if (booking.customer.toString() !== req.userId) {
+    const err = new Error("You can only review your own bookings");
+    err.status = 403;
+    throw err;
   }
 
   // Check if booking is completed
   if (booking.status !== "completed") {
-    return res.status(400).json({
-      success: false,
-      message: "You can only review completed bookings",
-    });
+    const err = new Error("You can only review completed bookings");
+    err.status = 400;
+    throw err;
   }
 
   // Check if review already exists for this booking
   const existingReview = await Review.findOne({ booking: bookingId });
   if (existingReview) {
-    return res.status(400).json({
-      success: false,
-      message: "You have already reviewed this booking",
-    });
+    const err = new Error("You have already reviewed this booking");
+    err.status = 400;
+    throw err;
   }
 
   // Create the review
-  const newReview = await Review.create({
-    customer: req.user.id,
+  const reviewData = {
+    booking: bookingId,
+    customer: req.userId,
     provider: booking.provider,
     service: booking.service,
-    booking: bookingId,
     rating,
-    title,
-    review,
-  });
+    comment,
+    serviceQuality,
+    communication,
+    punctuality,
+    valueForMoney,
+  };
 
-  // Populate the review with user details
-  await newReview.populate([
-    { path: "customer", select: "name email" },
-    { path: "provider", select: "name email" },
-    { path: "service", select: "title category" },
+  const review = new Review(reviewData);
+  await review.save();
+
+  // Populate review with related data
+  await review.populate([
+    { path: "booking", select: "service" },
+    { path: "customer", select: "name" },
+    { path: "provider", select: "name" },
+    { path: "service", select: "title" },
   ]);
 
-  // Update provider's average rating
+  // Update service average rating
+  await updateServiceRating(booking.service);
+
+  // Update provider average rating
   await updateProviderRating(booking.provider);
+
+  // Send push notification to provider (non-blocking)
+  try {
+    const provider = await User.findById(booking.provider).select(
+      "notificationPreferences",
+    );
+    if (provider && provider.notificationPreferences?.newReviews !== false) {
+      await PushNotificationService.sendNewReviewNotification(
+        review,
+        review.service,
+        booking.provider,
+      );
+    }
+  } catch (pushError) {
+    console.error("Failed to send push notification:", pushError);
+    // Don't fail the review creation if push notification fails
+  }
 
   res.status(201).json({
     success: true,
-    data: newReview,
+    message: "Review created successfully",
+    review,
   });
 });
 
