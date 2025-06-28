@@ -14,8 +14,9 @@ This is a backend for a hyper-local services marketplace (like plumber/tutor fin
 - **Real-time Chat:** Socket.IO, chat/message models, WebSocket server, typing indicators, read receipts
 - **Email Notifications:** Nodemailer integration, welcome emails, booking confirmations, status updates, message notifications, password reset
 - **Push Notifications:** Web Push API, service worker, VAPID keys, user preferences, admin broadcasting, rich notifications
+- **Centralized Error Handling:** Custom error classes, consistent error responses, proper HTTP status codes, error codes, detailed error information
 - **Admin Dashboard & Moderation:** User/service/review moderation, analytics, admin role, moderation fields
-- **Error Handling:** Centralized, async wrapper
+- **Error Handling:** Centralized, async wrapper, custom error classes, comprehensive logging
 - **Security:** Helmet, CORS, rate limiting, input validation everywhere
 
 ## Folder Structure (important for me)
@@ -23,8 +24,8 @@ This is a backend for a hyper-local services marketplace (like plumber/tutor fin
 - `src/models/` — User, Service, Booking, Review, Chat, Message (all robust, indexed, role-aware, moderation-ready)
 - `src/controllers/` — Auth, Service, Booking, Review, Search, Chat, Admin, Push (all RESTful, modular)
 - `src/routes/` — Auth, Services, Bookings, Reviews, Search, Chats, Admin, Push (all protected as needed)
-- `src/middleware/` — Auth (JWT), isAdmin, error handler
-- `src/utils/` — asyncHandler, emailService, pushNotificationService (nodemailer templates and push notification functions)
+- `src/middleware/` — Auth (JWT), isAdmin, error handler, centralized error handling
+- `src/utils/` — asyncHandler, emailService, pushNotificationService, errors (custom error classes and utilities)
 - `src/config/` — email configuration and setup guide
 - `src/socket/` — SocketServer (WebSocket, real-time chat)
 - `public/` — Service worker (sw.js), web app manifest (manifest.json)
@@ -42,8 +43,9 @@ This is a backend for a hyper-local services marketplace (like plumber/tutor fin
 - Chat: Real-time, Socket.IO, JWT auth, rooms, typing, read receipts, unread counts, email notifications, push notifications
 - Email: Nodemailer, welcome emails, booking confirmations, status updates, message notifications, password reset
 - Push Notifications: Web Push API, VAPID keys, service worker, user preferences, admin broadcasting, rich notifications
+- Error Handling: Custom error classes, consistent responses, proper status codes, error codes, detailed information, comprehensive logging
 - Admin: User/service/review moderation, analytics, admin role, block/approve/feature actions, notification broadcasting
-- Error handling: Centralized, async wrapper
+- Error handling: Centralized, async wrapper, custom error classes, comprehensive logging
 - Security: Helmet, CORS, rate limiting, input validation
 - All endpoints RESTful, protected as needed
 
@@ -67,6 +69,16 @@ This is a backend for a hyper-local services marketplace (like plumber/tutor fin
 - **User Preferences:** Granular control over notification types
 - **Rich Notifications:** Support for actions, icons, and deep linking
 
+## Error Handling System Implemented
+
+- **Custom Error Classes:** AuthenticationError, AuthorizationError, ValidationError, NotFoundError, ConflictError, etc.
+- **Predefined Error Instances:** Common errors like INVALID_CREDENTIALS, EMAIL_ALREADY_EXISTS, USER_NOT_FOUND
+- **Error Factory:** Easy creation of custom errors and conversion from Joi/MongoDB errors
+- **Consistent Error Responses:** Standardized format with error codes, status codes, and details
+- **Comprehensive Logging:** Error logging with context (URL, method, IP, user agent, timestamp)
+- **Automatic Error Handling:** MongoDB errors, JWT errors, Joi validation errors handled automatically
+- **Frontend Integration:** Error codes for consistent frontend error handling
+
 ## What's ready?
 
 - Project structure, dependencies, .env, .gitignore
@@ -75,11 +87,13 @@ This is a backend for a hyper-local services marketplace (like plumber/tutor fin
 - Real-time chat system with WebSocket
 - Email notification system with nodemailer (Gmail configured)
 - Push notification system with Web Push API (VAPID keys, service worker)
+- Centralized error handling system with custom error classes
 - Admin dashboard with full moderation capabilities
 - Password reset functionality
 - Comprehensive API documentation (API_DOCS.md)
 - Email setup guide (EMAIL_SETUP.md)
 - Push notification documentation (PUSH_NOTIFICATIONS_README.md)
+- Error handling documentation (ERROR_HANDLING_README.md)
 - Modular, ready for new features (file uploads, payments, etc)
 
 ## How to use this note
@@ -96,10 +110,11 @@ If I (the AI) need to recall the project's architecture, features, or best pract
 - Email templates customization
 - Email queuing for high volume
 - Mobile app push notifications
+- Error analytics and monitoring
 
 ## For details
 
-See the full project files, API_DOCS.md for endpoint-level docs, EMAIL_SETUP.md for email configuration details, and PUSH_NOTIFICATIONS_README.md for push notification implementation.
+See the full project files, API_DOCS.md for endpoint-level docs, EMAIL_SETUP.md for email configuration details, PUSH_NOTIFICATIONS_README.md for push notification implementation, and ERROR_HANDLING_README.md for error handling system.
 
 ## Email Setup Required
 
@@ -118,11 +133,22 @@ To use push notifications:
 3. Frontend needs service worker registration
 4. See PUSH_NOTIFICATIONS_README.md for detailed instructions
 
+## Error Handling Setup
+
+The error handling system is automatically configured and ready to use:
+
+1. Custom error classes are available in `src/utils/errors.js`
+2. Predefined error instances for common scenarios
+3. Error factory for creating custom errors
+4. Automatic error handling middleware
+5. See ERROR_HANDLING_README.md for detailed usage
+
 ## Current Status
 
 ✅ **Backend Complete** - All core features implemented
 ✅ **Email System Working** - Gmail configured and tested
 ✅ **Push Notifications Working** - Web Push API implemented and tested
+✅ **Error Handling System Working** - Centralized error handling implemented and tested
 ✅ **API Documentation** - Comprehensive docs created
 ✅ **Ready for Frontend** - All endpoints documented and tested
 
@@ -134,5 +160,6 @@ The backend is now complete and ready for frontend development:
 - Real-time chat with WebSocket support
 - Email notifications working
 - Push notifications with service worker ready
+- Centralized error handling with consistent error codes
 - Admin dashboard functional
 - Security and validation in place

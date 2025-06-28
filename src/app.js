@@ -11,7 +11,7 @@ const reviewRoutes = require("./routes/reviews");
 const searchRoutes = require("./routes/search");
 const chatRoutes = require("./routes/chats");
 const pushRoutes = require("./routes/push");
-const errorHandler = require("./middleware/errorHandler");
+const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
 const adminRoutes = require("./routes/admin");
 
 const app = express();
@@ -41,10 +41,8 @@ app.use("/api/chats", chatRoutes);
 app.use("/api/push", pushRoutes);
 app.use("/api/admin", adminRoutes);
 
-// 404 handler
-app.use((req, res, next) => {
-  res.status(404).json({ success: false, message: "Route not found" });
-});
+// 404 handler for unmatched routes
+app.use(notFoundHandler);
 
 // Centralized error handler
 app.use(errorHandler);

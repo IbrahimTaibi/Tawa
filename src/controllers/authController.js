@@ -8,6 +8,14 @@ const {
 } = require("../utils/emailService");
 const crypto = require("crypto");
 const dotenv = require("dotenv");
+const {
+  Errors,
+  ErrorFactory,
+  ValidationError,
+  ConflictError,
+  AuthenticationError,
+  EmailError,
+} = require("../utils/errors");
 dotenv.config();
 
 const customerRegisterSchema = Joi.object({
@@ -55,127 +63,140 @@ const loginSchema = Joi.object({
 });
 
 exports.register = asyncHandler(async (req, res) => {
-  const { role } = req.body;
-
-  // Choose validation schema based on role
-  const schema =
-    role === "provider" ? providerRegisterSchema : customerRegisterSchema;
-  const { error } = schema.validate(req.body);
-
+  const { error } = customerRegisterSchema.validate(req.body);
   if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
   }
 
-  const { email } = req.body;
+  const {
+    name,
+    email,
+    password,
+    role,
+    businessName,
+    serviceCategory,
+    businessDescription,
+    phone,
+    address,
+  } = req.body;
+
+  // Check if user already exists
   const existingUser = await User.findOne({ email });
   if (existingUser) {
-    const err = new Error("Email already in use");
-    err.status = 409;
-    throw err;
+    throw Errors.EMAIL_ALREADY_EXISTS;
   }
 
-  const user = new User(req.body);
-  try {
-    await user.save();
-  } catch (err) {
-    if (err.code === 11000) {
-      const error = new Error("Email already in use");
-      error.status = 409;
-      throw error;
-    }
-    throw err;
-  }
+  // Create user
+  const userData = {
+    name,
+    email,
+    password,
+    role,
+    ...(role === "provider" && {
+      businessName,
+      serviceCategory,
+      businessDescription,
+      phone,
+      address,
+    }),
+  };
+
+  const user = new User(userData);
+  await user.save();
+
+  // Generate JWT token
+  const token = jwt.sign(
+    { userId: user._id, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" },
+  );
 
   // Send welcome email (non-blocking)
   try {
     await sendWelcomeEmail(user);
   } catch (emailError) {
     console.error("Failed to send welcome email:", emailError);
-    // Don't fail the registration if email fails
+    // Don't fail registration if email fails
   }
 
-  const token = jwt.sign(
-    { id: user._id, role: user.role },
-    process.env.JWT_SECRET,
-    {
-      expiresIn: "7d",
+  res.status(201).json({
+    success: true,
+    message: "User registered successfully",
+    data: {
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        businessName: user.businessName,
+        serviceCategory: user.serviceCategory,
+        isVerified: user.isVerified,
+      },
+      token,
     },
-  );
-
-  // Return user data based on role
-  const userResponse = {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-  };
-
-  if (user.role === "provider") {
-    userResponse.businessName = user.businessName;
-    userResponse.serviceCategory = user.serviceCategory;
-    userResponse.phone = user.phone;
-    userResponse.address = user.address;
-  }
-
-  res.status(201).json({ token, user: userResponse });
+  });
 });
 
 exports.login = asyncHandler(async (req, res) => {
   const { error } = loginSchema.validate(req.body);
   if (error) {
-    const err = new Error("Invalid email or password");
-    err.status = 400;
-    throw err;
+    throw ErrorFactory.fromJoiError(error);
   }
+
   const { email, password } = req.body;
+
+  // Find user by email
   const user = await User.findOne({ email });
   if (!user) {
-    const err = new Error("Invalid email or password");
-    err.status = 401;
-    throw err;
+    throw Errors.INVALID_CREDENTIALS;
   }
-  const isMatch = await user.comparePassword(password);
-  if (!isMatch) {
-    const err = new Error("Invalid email or password");
-    err.status = 401;
-    throw err;
+
+  // Check if user is blocked
+  if (user.isBlocked) {
+    throw new AuthenticationError(
+      "Account has been blocked. Please contact support.",
+    );
   }
+
+  // Verify password
+  const isPasswordValid = await user.comparePassword(password);
+  if (!isPasswordValid) {
+    throw Errors.INVALID_CREDENTIALS;
+  }
+
+  // Generate JWT token
   const token = jwt.sign(
-    { id: user._id, role: user.role },
+    { userId: user._id, role: user.role },
     process.env.JWT_SECRET,
-    {
-      expiresIn: "7d",
-    },
+    { expiresIn: "7d" },
   );
 
-  // Return user data based on role
-  const userResponse = {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-  };
-
-  if (user.role === "provider") {
-    userResponse.businessName = user.businessName;
-    userResponse.serviceCategory = user.serviceCategory;
-    userResponse.phone = user.phone;
-    userResponse.address = user.address;
-  }
-
-  res.json({ token, user: userResponse });
+  res.json({
+    success: true,
+    message: "Login successful",
+    data: {
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        businessName: user.businessName,
+        serviceCategory: user.serviceCategory,
+        isVerified: user.isVerified,
+        averageRating: user.averageRating,
+        totalReviews: user.totalReviews,
+      },
+      token,
+    },
+  });
 });
 
-// Request password reset
-exports.requestPasswordReset = asyncHandler(async (req, res) => {
+// Forgot password
+exports.forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
 
   if (!email) {
-    const err = new Error("Email is required");
-    err.status = 400;
-    throw err;
+    throw Errors.MISSING_REQUIRED_FIELD("email");
   }
 
   const user = await User.findOne({ email });
@@ -183,18 +204,18 @@ exports.requestPasswordReset = asyncHandler(async (req, res) => {
     // Don't reveal if email exists or not for security
     return res.json({
       success: true,
-      message:
-        "If an account with that email exists, a password reset link has been sent.",
+      message: "If the email exists, a password reset link has been sent",
     });
   }
 
   // Generate reset token
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
+  const resetToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
+    expiresIn: "1h",
+  });
 
   // Save reset token to user
   user.resetPasswordToken = resetToken;
-  user.resetPasswordExpires = resetTokenExpiry;
+  user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour
   await user.save();
 
   // Send password reset email
@@ -202,59 +223,49 @@ exports.requestPasswordReset = asyncHandler(async (req, res) => {
     await sendPasswordResetEmail(user, resetToken);
   } catch (emailError) {
     console.error("Failed to send password reset email:", emailError);
-    const err = new Error("Failed to send password reset email");
-    err.status = 500;
-    throw err;
+    throw new EmailError("Failed to send password reset email");
   }
 
   res.json({
     success: true,
-    message:
-      "If an account with that email exists, a password reset link has been sent.",
+    message: "If the email exists, a password reset link has been sent",
   });
 });
 
-// Reset password with token
+// Reset password
 exports.resetPassword = asyncHandler(async (req, res) => {
   const { token, newPassword } = req.body;
 
   if (!token || !newPassword) {
-    const err = new Error("Token and new password are required");
-    err.status = 400;
-    throw err;
+    throw new ValidationError("Token and new password are required");
   }
 
-  // Validate password strength
-  const passwordSchema = Joi.string()
-    .min(8)
-    .max(128)
-    .pattern(new RegExp("^(?=.*[a-z])(?=.*[A-Z])(?=.*d).+$"))
-    .required()
-    .messages({
-      "string.pattern.base":
-        "Password must contain at least one uppercase letter, one lowercase letter, and one number.",
-    });
-
-  const { error } = passwordSchema.validate(newPassword);
-  if (error) {
-    const err = new Error(error.details[0].message);
-    err.status = 400;
-    throw err;
+  // Verify token
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (jwtError) {
+    throw Errors.TOKEN_INVALID;
   }
 
   // Find user with valid reset token
   const user = await User.findOne({
+    _id: decoded.userId,
     resetPasswordToken: token,
     resetPasswordExpires: { $gt: Date.now() },
   });
 
   if (!user) {
-    const err = new Error("Invalid or expired reset token");
-    err.status = 400;
-    throw err;
+    throw new AuthenticationError("Invalid or expired reset token");
   }
 
-  // Update password and clear reset token
+  // Validate new password
+  const { error } = passwordSchema.validate({ password: newPassword });
+  if (error) {
+    throw ErrorFactory.fromJoiError(error);
+  }
+
+  // Update password
   user.password = newPassword;
   user.resetPasswordToken = undefined;
   user.resetPasswordExpires = undefined;
@@ -262,6 +273,6 @@ exports.resetPassword = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    message: "Password has been reset successfully",
+    message: "Password reset successful",
   });
 });
